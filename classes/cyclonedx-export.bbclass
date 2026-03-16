@@ -13,9 +13,6 @@ CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
 CYCLONEDX_EXPORT_TMP ??= "${TMPDIR}/cyclonedx-export"
 CYCLONEDX_EXPORT_LOCK ??= "${CYCLONEDX_EXPORT_TMP}/bom.lock"
 
-# Use build-time image manifest if available
-CYCLONEDX_ROOTFS_MANIFEST ?= "${IMAGE_MANIFEST}"
-
 def read_json(path):
     import json
     from pathlib import Path
@@ -241,7 +238,7 @@ def cyclonedx_collect_recipe_metadata(d, pn):
 python do_cyclonedx_rootfs_sbom() {
     """
     Image-level task that generates the CycloneDX SBOM based on the
-    final rootfs manifest in ${CYCLONEDX_ROOTFS_MANIFEST}.
+    final rootfs manifest in ${IMAGE_MANIFEST}.
     """
     import os
     import bb
@@ -261,7 +258,7 @@ python do_cyclonedx_rootfs_sbom() {
         # Not an image (no filesystem types defined)
         return
 
-    manifest_path = d.getVar("CYCLONEDX_ROOTFS_MANIFEST") or ""
+    manifest_path = d.getVar("IMAGE_MANIFEST") or ""
     bb.note(f"CycloneDX: expecting rootfs manifest at {manifest_path}")
     bb.note(f"CycloneDX: manifest exists: {os.path.exists(manifest_path)}")
 
