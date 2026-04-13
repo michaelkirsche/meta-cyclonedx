@@ -13,6 +13,92 @@ CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
 CYCLONEDX_EXPORT_TMP ??= "${TMPDIR}/cyclonedx-export"
 CYCLONEDX_EXPORT_LOCK ??= "${CYCLONEDX_EXPORT_TMP}/bom.lock"
 
+
+def _replace_name_in_field(field_value: str, old_name: str, new_name: str) -> str:
+    if not field_value:
+        return field_value
+    # Simple, robust text replacement (case-sensitive)
+    return field_value.replace(old_name, new_name)
+
+
+def _apply_mapping(component: dict, old_name: str, new_name: str, description: str | None = None) -> dict:
+    import copy
+
+    updated = copy.deepcopy(component)
+
+    # name
+    if "name" in updated:
+        updated["name"] = new_name
+
+    # cpe  – e.g. cpe:2.3:a:vendor:old-lib:1.0:*:*:*:*:*:*:*
+    if "cpe" in updated:
+        updated["cpe"] = _replace_name_in_field(updated["cpe"], old_name, new_name)
+
+    # purl – e.g. pkg:npm/old-lib@1.0.0
+    if "purl" in updated:
+        updated["purl"] = _replace_name_in_field(updated["purl"], old_name, new_name)
+
+    # description – only replaced if provided in the mapping entry
+    if description is not None:
+        updated["description"] = description
+
+    return updated
+
+
+def process_components(sbom: dict, mapping: list[dict]) -> tuple[dict, list[str]]:
+    import copy
+
+    result = copy.deepcopy(sbom)
+    components: list = result.get("components", [])
+
+    # Build index for faster lookup: name -> [indices]
+    def build_index(comps):
+        idx: dict[str, list[int]] = {}
+        for i, c in enumerate(comps):
+            n = c.get("name", "")
+            idx.setdefault(n, []).append(i)
+        return idx
+
+    for entry in mapping:
+        search_name: str       = entry.get("search_name", "")
+        new_name: str          = entry.get("new_name", "")
+        action: str            = entry.get("action", "replace").lower()
+        description: str | None = entry.get("description", None)
+
+        if not search_name or not new_name:
+            print(f"[WARN] Invalid mapping entry skipped: {entry}")
+            continue
+
+        if action not in ("replace", "append"):
+            print(f"[WARN] Unknown action '{action}' for '{search_name}' – skipped.")
+            continue
+
+        # Rebuild index (insert operations shift positions)
+        name_index = build_index(components)
+        found_indices = name_index.get(search_name, [])
+
+        if not found_indices:
+            print(f"[INFO] Component '{search_name}' not found – no entry modified.")
+            continue
+
+        if action == "replace":
+            for i in found_indices:
+                components[i] = _apply_mapping(components[i], search_name, new_name, description)
+                print(f"[REPLACE] '{search_name}' → '{new_name}' (index {i})"
+                      + (f" [description updated]" if description is not None else ""))
+
+        elif action == "append":
+            # Iterate in reverse to keep insertion positions stable
+            for i in sorted(found_indices, reverse=True):
+                new_component = _apply_mapping(components[i], search_name, new_name, description)
+                insert_pos = i + 1
+                components.insert(insert_pos, new_component)
+                print(f"[APPEND] Copy of '{search_name}' inserted as '{new_name}' at index {insert_pos}."
+                      + (f" [description updated]" if description is not None else ""))
+
+    result["components"] = components
+    return result
+
 def read_json(path):
     import json
     from pathlib import Path
@@ -26,25 +112,6 @@ def write_json(path, content):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(content, indent=2, sort_keys=False), encoding="utf-8")
 
-def replace_keys(mapping_file_path, sbom_file_path):
-    import subprocess
-    import tempfile
-
-    # Create temporary sed script
-    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp:
-        subprocess.run(
-            ["sed", "s/^/s|/; s/=/|/; s/$/|g/", mapping_file_path],
-            stdout=tmp,
-            check=True
-        )
-        sed_script = tmp.name
-
-    # Apply sed script
-    subprocess.run(
-        ["sed", "-i", "-f", sed_script, sbom_file_path],
-        check=True
-    )
-
 python do_cyclonedx_init() {
     import uuid
     from datetime import datetime, timezone
@@ -57,8 +124,8 @@ python do_cyclonedx_init() {
     metadata_component = {
     "bom-ref": "BomRef.485485485584318.384648452452532",
     "name": d.getVar("PN") or "image",
-    "type": "os",
-    "version": d.getVar("PV")
+    "type": "library",
+    "version": d.getVar("PV") or ""
     }
 
     # Generate unique serial numbers for sbom document
@@ -307,8 +374,8 @@ python do_cyclonedx_rootfs_sbom() {
         metadata_component = {
         "bom-ref": "BomRef.485485485584318.384648452452532",
         "name": d.getVar("PN") or "image",
-        "type": "os",
-        "version": d.getVar("PV")
+        "type": "library",
+        "version": d.getVar("PV") or ""
         }
 
         write_json(sbom_path, {
@@ -468,10 +535,16 @@ python do_cyclonedx_rootfs_sbom() {
             if cpe:
                 existing_cpes.add(cpe)
 
-    # Write back SBOM
-    write_json(sbom_path, sbom)
 
-    replace_keys("cyclonedx_mapping.txt", sbom_path)
+    mapping = read_json("mapping.json")
+
+    if not isinstance(mapping, list):
+        raise ValueError("The mapping file must be a JSON list.")
+
+    updated_sbom = process_components(sbom, mapping)
+
+    # Write back SBOM
+    write_json(sbom_path, updated_sbom)
 
     bb.note(
         "CycloneDX: manifest packages: %d, processed with pkgdata: %d, "

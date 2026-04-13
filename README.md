@@ -69,3 +69,136 @@ At the time of writing this can be done by leveraging the following API endpoint
 Please refer to [DependencyTracks REST API documentation](https://docs.dependencytrack.org/integrations/rest-api/) for the usage of these endpoints as well as the required token permissions.
 
 In the future we might include an example script in this repository.
+
+
+## Mapping File Reference
+
+The `mapping.json` file controls how components in the SBOM are modified.
+It is a JSON array where each entry defines one transformation rule.
+
+---
+
+### Structure
+
+```json
+[
+  {
+    "search_name": "old-lib",
+    "new_name":    "new-lib",
+    "action":      "replace",
+    "description": "Optional description text."
+  }
+]
+```
+
+---
+
+### Fields
+
+| Field | Required | Description |
+|---|---|---|
+| `search_name` | ✅ Yes | The exact component name to search for in the SBOM. |
+| `new_name` | ✅ Yes | The name to use as a replacement. Applied to `name`, `cpe`, and `purl`. |
+| `action` | ✅ Yes | What to do with the found component. Either `replace` or `append` (see below). |
+| `description` | ❌ No | If provided, overwrites the component's `description` field. If omitted, the existing description is left unchanged. |
+
+---
+
+### Actions
+
+#### `replace`
+The matched component is modified **in place**.
+The `name`, `cpe`, and `purl` fields are updated to use `new_name`.
+
+**Before:**
+```json
+{
+  "name": "old-lib",
+  "cpe":  "cpe:2.3:a:vendor:old-lib:1.0:*:*:*:*:*:*:*",
+  "purl": "pkg:npm/old-lib@1.0.0"
+}
+```
+
+**After** (with `"new_name": "new-lib"`):
+```json
+{
+  "name": "new-lib",
+  "cpe":  "cpe:2.3:a:vendor:new-lib:1.0:*:*:*:*:*:*:*",
+  "purl": "pkg:npm/new-lib@1.0.0"
+}
+```
+
+---
+
+#### `append`
+The matched component is **kept unchanged**. A deep copy is created with
+`name`, `cpe`, and `purl` updated to use `new_name`, and inserted
+directly after the original in the component list.
+
+**Before:**
+```json
+[
+  { "name": "legacy-framework", "purl": "pkg:maven/com.acme/legacy-framework@3.0.0" }
+]
+```
+
+**After** (with `"new_name": "modern-framework"`):
+```json
+[
+  { "name": "legacy-framework",  "purl": "pkg:maven/com.acme/legacy-framework@3.0.0" },
+  { "name": "modern-framework",  "purl": "pkg:maven/com.acme/modern-framework@3.0.0" }
+]
+```
+
+---
+
+### The `description` Field
+
+When `description` is provided in a mapping entry, it overwrites the
+`description` field of the affected component (or its copy in the case of `append`).
+
+```json
+{
+  "search_name": "old-lib",
+  "new_name":    "new-lib",
+  "action":      "replace",
+  "description": "Migrated to the vendor-approved version in Q2 2026."
+}
+```
+
+If `description` is **omitted**, the component's existing description remains untouched.
+
+---
+
+### Full Example
+
+```json
+[
+  {
+    "search_name": "old-lib",
+    "new_name":    "new-lib",
+    "action":      "replace",
+    "description": "Replaced with the patched version."
+  },
+  {
+    "search_name": "legacy-framework",
+    "new_name":    "modern-framework",
+    "action":      "append"
+  },
+  {
+    "search_name": "util-core",
+    "new_name":    "util-core-hardened",
+    "action":      "replace"
+  }
+]
+```
+
+---
+
+### Notes
+
+- **`search_name` is case-sensitive.** `Old-Lib` and `old-lib` are treated as different components.
+- **Multiple matches:** If the same name appears more than once in the SBOM, the rule is applied to all occurrences.
+- **Multiple rules:** Rules are applied in order from top to bottom. A component can be affected by more than one rule if the names match.
+- **Name substitution in `cpe` and `purl`** is a simple text replacement — every occurrence of `search_name` within the field value is replaced with `new_name`.
+
