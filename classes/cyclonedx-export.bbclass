@@ -54,6 +54,13 @@ python do_cyclonedx_init() {
     bb.debug(2, "CycloneDX: creating cyclonedx directory: %s" % sbom_dir)
     bb.utils.mkdirhier(sbom_dir)
 
+    metadata_component = {
+    "bom-ref": "BomRef.485485485584318.384648452452532",
+    "name": d.getVar("PN") or "image",
+    "type": "os",
+    "version": d.getVar("PV")
+    }
+
     # Generate unique serial numbers for sbom document
     sbom_serial_number = str(uuid.uuid4())
     bb.debug(2, f"CycloneDX: creating empty sbom file with serial number {sbom_serial_number}")
@@ -64,7 +71,8 @@ python do_cyclonedx_init() {
         "version": 1,
         "metadata": {
             "timestamp": timestamp,
-            "tools": [{"name": "yocto"}]
+            "tools": [{"name": "yocto"}],
+            "component": metadata_component
         },
         "components": []
     })
@@ -294,6 +302,15 @@ python do_cyclonedx_rootfs_sbom() {
         timestamp = datetime.now(timezone.utc).isoformat()
         sbom_serial_number = str(uuid.uuid4())
         bb.note(f"CycloneDX: SBOM not found at {sbom_path}, creating new skeleton")
+
+
+        metadata_component = {
+        "bom-ref": "BomRef.485485485584318.384648452452532",
+        "name": d.getVar("PN") or "image",
+        "type": "os",
+        "version": d.getVar("PV")
+        }
+
         write_json(sbom_path, {
             "bomFormat": "CycloneDX",
             "specVersion": "1.4",
@@ -301,7 +318,8 @@ python do_cyclonedx_rootfs_sbom() {
             "version": 1,
             "metadata": {
                 "timestamp": timestamp,
-                "tools": [{"name": "yocto"}]
+                "tools": [{"name": "yocto"}],
+                "component": metadata_component
             },
             "components": []
         })
