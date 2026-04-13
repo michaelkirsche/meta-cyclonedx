@@ -1,2 +1,0 @@
-example=example_replaced
-example1=example_replaced1
