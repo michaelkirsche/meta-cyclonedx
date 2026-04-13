@@ -13,7 +13,6 @@ CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
 CYCLONEDX_EXPORT_TMP ??= "${TMPDIR}/cyclonedx-export"
 CYCLONEDX_EXPORT_LOCK ??= "${CYCLONEDX_EXPORT_TMP}/bom.lock"
 
-
 def _replace_name_in_field(field_value: str, old_name: str, new_name: str) -> str:
     if not field_value:
         return field_value
@@ -341,6 +340,7 @@ python do_cyclonedx_rootfs_sbom() {
     # from oe.package_data import read_pkgdatafile, pkgdatadir
     ### --> for Yocto release kirkstone <-- ###
     import oe.packagedata
+    import Path
 
     pn = d.getVar("PN") or ""
     taskhash = d.getVar("BB_TASKHASH_do_cyclonedx_rootfs_sbom") or ""
@@ -535,8 +535,9 @@ python do_cyclonedx_rootfs_sbom() {
             if cpe:
                 existing_cpes.add(cpe)
 
+    MAPPING_PATH = Path(__file__).parent.parent / "conf" / "mapping.json"
 
-    mapping = read_json("mapping.json")
+    mapping = read_json(MAPPING_PATH)
 
     if not isinstance(mapping, list):
         raise ValueError("The mapping file must be a JSON list.")
