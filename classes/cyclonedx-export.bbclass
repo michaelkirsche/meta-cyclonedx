@@ -26,6 +26,25 @@ def write_json(path, content):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(content, indent=2, sort_keys=False), encoding="utf-8")
 
+def replace_keys(mapping_file_path, sbom_file_path):
+    import subprocess
+    import tempfile
+
+    # Create temporary sed script
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as tmp:
+        subprocess.run(
+            ["sed", "s/^/s|/; s/=/|/; s/$/|g/", mapping_file_path],
+            stdout=tmp,
+            check=True
+        )
+        sed_script = tmp.name
+
+    # Apply sed script
+    subprocess.run(
+        ["sed", "-i", "-f", sed_script, sbom_file_path],
+        check=True
+    )
+
 python do_cyclonedx_init() {
     import uuid
     from datetime import datetime, timezone
@@ -433,6 +452,9 @@ python do_cyclonedx_rootfs_sbom() {
 
     # Write back SBOM
     write_json(sbom_path, sbom)
+
+    replace_keys("cyclonedx_mapping.txt", sbom_path)
+
     bb.note(
         "CycloneDX: manifest packages: %d, processed with pkgdata: %d, "
         "skipped (no pkgdata): %d, skipped (no PN): %d, skipped duplicate CPEs: %d"
