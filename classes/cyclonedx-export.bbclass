@@ -13,6 +13,8 @@ CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
 CYCLONEDX_EXPORT_TMP ??= "${TMPDIR}/cyclonedx-export"
 CYCLONEDX_EXPORT_LOCK ??= "${CYCLONEDX_EXPORT_TMP}/bom.lock"
 
+SBOM_MAPPING_PATH ?= "${LAYERDIR}/conf/mapping.json"
+
 def _replace_name_in_field(field_value: str, old_name: str, new_name: str) -> str:
     if not field_value:
         return field_value
@@ -535,7 +537,16 @@ python do_cyclonedx_rootfs_sbom() {
             if cpe:
                 existing_cpes.add(cpe)
 
-    MAPPING_PATH = Path(__file__).parent.parent / "conf" / "mapping.json"
+    # Process component mapping 
+    mapping_path_str = d.getVar("SBOM_MAPPING_PATH")
+
+    if not mapping_path_str:
+        bb.fatal("SBOM_MAPPING_PATH is not set. Please define it in your configuration.")
+
+    mapping_path = Path(mapping_path_str)
+
+    if not mapping_path.exists():
+        bb.fatal(f"SBOM mapping file not found at '{mapping_path}'. Please check SBOM_MAPPING_PATH.")
 
     mapping = read_json(MAPPING_PATH)
 
