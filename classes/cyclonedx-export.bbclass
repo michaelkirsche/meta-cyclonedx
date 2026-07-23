@@ -426,6 +426,11 @@ python do_cyclonedx_rootfs_sbom() {
     if "components" not in sbom or not isinstance(sbom["components"], list):
         sbom["components"] = []
 
+    # Name the real image as the BOM's top-level subject. do_cyclonedx_init runs on the
+    # global datastore (PN unset) so its metadata.component is generic; here we have the
+    # image recipe's PN/PV. Multi-image builds share one bom.json -> last writer wins.
+    sbom.setdefault("metadata", {})["component"] = cyclonedx_metadata_component(d)
+
     # ------------------------------------------------------------------------
     # For each manifest package, look up its runtime pkgdata entry
     # ------------------------------------------------------------------------
@@ -450,6 +455,8 @@ python do_cyclonedx_rootfs_sbom() {
         # Ensure PN in the sub-datastore matches the recipe
         d_recipe.setVar("PN", pn)
         # Import selected metadata from pkgdata (PV, LICENSE, DESCRIPTION, SECTION, HOMEPAGE, SRC_URI, etc.)
+        # Set unconditionally: runtime pkgdata lacks HOMEPAGE/SRC_URI/CVE_PRODUCT/CVE_VERSION, so a
+        # conditional set would leave the image recipe's values leaking into every component.
         for key in (
             "PV",
             "LICENSE",
@@ -461,8 +468,7 @@ python do_cyclonedx_rootfs_sbom() {
             "CVE_VERSION",
             "CVE_CHECK_IGNORE",
         ):
-            if key in pkgvars:
-                d_recipe.setVar(key, pkgvars[key])
+            d_recipe.setVar(key, pkgvars.get(key, ""))
 
         meta = cyclonedx_collect_recipe_metadata(d_recipe, pn)
 
