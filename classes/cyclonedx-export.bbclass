@@ -10,8 +10,7 @@ CVE_VERSION ??= "${PV}"
 
 CYCLONEDX_EXPORT_DIR ??= "${DEPLOY_DIR}/cyclonedx-export"
 CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
-CYCLONEDX_EXPORT_TMP ??= "${TMPDIR}/cyclonedx-export"
-CYCLONEDX_EXPORT_LOCK ??= "${CYCLONEDX_EXPORT_TMP}/bom.lock"
+CYCLONEDX_EXPORT_LOCK ??= "${TMPDIR}/cyclonedx-export/bom.lock"
 
 # Optional SBOM post-processing. Empty = feature off. Point at your own rules
 # file (see conf/mapping.json.example) to rename/append components.
@@ -27,12 +26,22 @@ def cyclonedx_metadata_component(d):
         "version": d.getVar("PV") or "",
     }
 
-def _replace_name_in_field(field_value, old_name, new_name):
-    if not field_value:
-        return field_value
-    # Simple, robust text replacement (case-sensitive)
-    return field_value.replace(old_name, new_name)
-
+def cyclonedx_skeleton(d):
+    # Empty CycloneDX 1.4 document with a fresh serial number.
+    import uuid
+    from datetime import datetime, timezone
+    return {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.4",
+        "serialNumber": f"urn:uuid:{uuid.uuid4()}",
+        "version": 1,
+        "metadata": {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "tools": [{"name": "yocto"}],
+            "component": cyclonedx_metadata_component(d),
+        },
+        "components": [],
+    }
 
 def _apply_mapping(component, old_name, new_name, description=None):
     import copy
@@ -43,13 +52,13 @@ def _apply_mapping(component, old_name, new_name, description=None):
     if "name" in updated:
         updated["name"] = new_name
 
-    # cpe - e.g. cpe:2.3:a:vendor:old-lib:1.0:*:*:*:*:*:*:*
-    if "cpe" in updated:
-        updated["cpe"] = _replace_name_in_field(updated["cpe"], old_name, new_name)
+    # cpe - e.g. cpe:2.3:a:vendor:old-lib:1.0:*:*:*:*:*:*:* (case-sensitive text swap)
+    if updated.get("cpe"):
+        updated["cpe"] = updated["cpe"].replace(old_name, new_name)
 
     # purl - e.g. pkg:npm/old-lib@1.0.0
-    if "purl" in updated:
-        updated["purl"] = _replace_name_in_field(updated["purl"], old_name, new_name)
+    if updated.get("purl"):
+        updated["purl"] = updated["purl"].replace(old_name, new_name)
 
     # description - only replaced if provided in the mapping entry
     if description is not None:
@@ -63,14 +72,6 @@ def process_components(sbom, mapping):
 
     result = copy.deepcopy(sbom)
     components = result.get("components", [])
-
-    # Build index for faster lookup: name -> [indices]
-    def build_index(comps):
-        idx = {}
-        for i, c in enumerate(comps):
-            n = c.get("name", "")
-            idx.setdefault(n, []).append(i)
-        return idx
 
     for entry in mapping:
         search_name = entry.get("search_name", "")
@@ -86,9 +87,8 @@ def process_components(sbom, mapping):
             print(f"[WARN] Unknown action '{action}' for '{search_name}' - skipped.")
             continue
 
-        # Rebuild index (insert operations shift positions)
-        name_index = build_index(components)
-        found_indices = name_index.get(search_name, [])
+        # Scan fresh each rule (insert operations shift positions)
+        found_indices = [i for i, c in enumerate(components) if c.get("name") == search_name]
 
         if not found_indices:
             print(f"[INFO] Component '{search_name}' not found - no entry modified.")
@@ -126,31 +126,13 @@ def write_json(path, content):
     p.write_text(json.dumps(content, indent=2, sort_keys=False), encoding="utf-8")
 
 python do_cyclonedx_init() {
-    import uuid
-    from datetime import datetime, timezone
-
-    timestamp = datetime.now(timezone.utc).isoformat()
     sbom_dir = d.getVar("CYCLONEDX_EXPORT_DIR")
     bb.debug(2, "CycloneDX: creating cyclonedx directory: %s" % sbom_dir)
     bb.utils.mkdirhier(sbom_dir)
 
-    metadata_component = cyclonedx_metadata_component(d)
-
-    # Generate unique serial numbers for sbom document
-    sbom_serial_number = str(uuid.uuid4())
-    bb.debug(2, f"CycloneDX: creating empty sbom file with serial number {sbom_serial_number}")
-    write_json(d.getVar("CYCLONEDX_EXPORT_SBOM"), {
-        "bomFormat": "CycloneDX",
-        "specVersion": "1.4",
-        "serialNumber": f"urn:uuid:{sbom_serial_number}",
-        "version": 1,
-        "metadata": {
-            "timestamp": timestamp,
-            "tools": [{"name": "yocto"}],
-            "component": metadata_component
-        },
-        "components": []
-    })
+    skeleton = cyclonedx_skeleton(d)
+    bb.debug(2, f"CycloneDX: creating empty sbom file with serial number {skeleton['serialNumber']}")
+    write_json(d.getVar("CYCLONEDX_EXPORT_SBOM"), skeleton)
 }
 addhandler do_cyclonedx_init
 do_cyclonedx_init[eventmask] = "bb.event.BuildStarted"
@@ -197,19 +179,6 @@ def normalize_license_expression(expr):
     # collapse whitespace
     return " ".join(normalized.split())
 
-def map_component_kind_to_cdx_type(kind):
-    """
-    Map internal component kind to a CycloneDX component.type.
-    """
-    kind = (kind or "application").lower()
-    if kind in ("os", "operating-system", "image"):
-        return "operating-system"
-    if kind in ("firmware", "bootloader"):
-        return "firmware"
-    if kind in ("lib", "library", "module"):
-        return "library"
-    return "application"
-
 def generate_packages_list(products_names, version, component_kind, license_expr, description, repo_url):
     """
     Get a list of products and generate CPE and PURL identifiers for each of them.
@@ -221,7 +190,8 @@ def generate_packages_list(products_names, version, component_kind, license_expr
     # keep only the short version which can be matched against vulnerabilities databases
     version = (version or "").split("+git")[0]
 
-    cdx_type = map_component_kind_to_cdx_type(component_kind)
+    # component_kind already carries a valid CycloneDX component.type
+    cdx_type = component_kind or "application"
     license_expr = normalize_license_expression(license_expr)
 
     # some packages have alternative names, so we split CVE_PRODUCT
@@ -351,8 +321,7 @@ python do_cyclonedx_rootfs_sbom() {
     import oe.packagedata
 
     pn = d.getVar("PN") or ""
-    taskhash = d.getVar("BB_TASKHASH_do_cyclonedx_rootfs_sbom") or ""
-    bb.note(f"CycloneDX: do_cyclonedx_rootfs_sbom start (PN={pn}, taskhash={taskhash})")
+    bb.note(f"CycloneDX: do_cyclonedx_rootfs_sbom start (PN={pn})")
 
      # Run only for image recipes (skip native, -native, -cross, etc.)
     image_fstypes = d.getVar("IMAGE_FSTYPES") or ""
@@ -372,26 +341,8 @@ python do_cyclonedx_rootfs_sbom() {
 
     # Ensure SBOM file exists; create skeleton if missing
     if not os.path.exists(sbom_path):
-        import uuid
-        from datetime import datetime, timezone
-        timestamp = datetime.now(timezone.utc).isoformat()
-        sbom_serial_number = str(uuid.uuid4())
         bb.note(f"CycloneDX: SBOM not found at {sbom_path}, creating new skeleton")
-
-        metadata_component = cyclonedx_metadata_component(d)
-
-        write_json(sbom_path, {
-            "bomFormat": "CycloneDX",
-            "specVersion": "1.4",
-            "serialNumber": f"urn:uuid:{sbom_serial_number}",
-            "version": 1,
-            "metadata": {
-                "timestamp": timestamp,
-                "tools": [{"name": "yocto"}],
-                "component": metadata_component
-            },
-            "components": []
-        })
+        write_json(sbom_path, cyclonedx_skeleton(d))
 
     sbom = read_json(sbom_path)
 

@@ -47,8 +47,8 @@ Per-component CPE/purl/type/license derivation lives in the pure helpers above t
 `SBOM_MAPPING_PATH` (default `""` = off) may point at a JSON file of rules that
 rename or duplicate components after collection, keyed by component name. `replace`
 rewrites `name`/`cpe`/`purl` (and optionally `description`) in place; `append` inserts
-a renamed copy after the original. Implemented by `process_components` /`_apply_mapping`
-/ `_replace_name_in_field`. The feature is skipped entirely when the var is empty or the
+a renamed copy after the original. Implemented by `process_components` / `_apply_mapping`.
+The feature is skipped entirely when the var is empty or the
 file is missing/empty. `conf/mapping.json.example` is a template only — it is never
 loaded unless the user explicitly points the var at it. Full rule reference is in the
 README ("Mapping File Reference").
