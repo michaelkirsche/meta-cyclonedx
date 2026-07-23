@@ -13,16 +13,28 @@ CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
 CYCLONEDX_EXPORT_TMP ??= "${TMPDIR}/cyclonedx-export"
 CYCLONEDX_EXPORT_LOCK ??= "${CYCLONEDX_EXPORT_TMP}/bom.lock"
 
-SBOM_MAPPING_PATH ?= "${LAYERDIR}/conf/mapping.json"
+# Optional SBOM post-processing. Empty = feature off. Point at your own rules
+# file (see conf/mapping.json.example) to rename/append components.
+SBOM_MAPPING_PATH ?= ""
 
-def _replace_name_in_field(field_value: str, old_name: str, new_name: str) -> str:
+def cyclonedx_metadata_component(d):
+    # The top-level component the BOM describes (the image itself).
+    import uuid
+    return {
+        "bom-ref": str(uuid.uuid4()),
+        "name": d.getVar("PN") or "image",
+        "type": "operating-system",
+        "version": d.getVar("PV") or "",
+    }
+
+def _replace_name_in_field(field_value, old_name, new_name):
     if not field_value:
         return field_value
     # Simple, robust text replacement (case-sensitive)
     return field_value.replace(old_name, new_name)
 
 
-def _apply_mapping(component: dict, old_name: str, new_name: str, description: str | None = None) -> dict:
+def _apply_mapping(component, old_name, new_name, description=None):
     import copy
 
     updated = copy.deepcopy(component)
@@ -31,47 +43,47 @@ def _apply_mapping(component: dict, old_name: str, new_name: str, description: s
     if "name" in updated:
         updated["name"] = new_name
 
-    # cpe  – e.g. cpe:2.3:a:vendor:old-lib:1.0:*:*:*:*:*:*:*
+    # cpe - e.g. cpe:2.3:a:vendor:old-lib:1.0:*:*:*:*:*:*:*
     if "cpe" in updated:
         updated["cpe"] = _replace_name_in_field(updated["cpe"], old_name, new_name)
 
-    # purl – e.g. pkg:npm/old-lib@1.0.0
+    # purl - e.g. pkg:npm/old-lib@1.0.0
     if "purl" in updated:
         updated["purl"] = _replace_name_in_field(updated["purl"], old_name, new_name)
 
-    # description – only replaced if provided in the mapping entry
+    # description - only replaced if provided in the mapping entry
     if description is not None:
         updated["description"] = description
 
     return updated
 
 
-def process_components(sbom: dict, mapping: list[dict]) -> tuple[dict, list[str]]:
+def process_components(sbom, mapping):
     import copy
 
     result = copy.deepcopy(sbom)
-    components: list = result.get("components", [])
+    components = result.get("components", [])
 
     # Build index for faster lookup: name -> [indices]
     def build_index(comps):
-        idx: dict[str, list[int]] = {}
+        idx = {}
         for i, c in enumerate(comps):
             n = c.get("name", "")
             idx.setdefault(n, []).append(i)
         return idx
 
     for entry in mapping:
-        search_name: str       = entry.get("search_name", "")
-        new_name: str          = entry.get("new_name", "")
-        action: str            = entry.get("action", "replace").lower()
-        description: str | None = entry.get("description", None)
+        search_name = entry.get("search_name", "")
+        new_name    = entry.get("new_name", "")
+        action      = entry.get("action", "replace").lower()
+        description = entry.get("description", None)
 
         if not search_name or not new_name:
             print(f"[WARN] Invalid mapping entry skipped: {entry}")
             continue
 
         if action not in ("replace", "append"):
-            print(f"[WARN] Unknown action '{action}' for '{search_name}' – skipped.")
+            print(f"[WARN] Unknown action '{action}' for '{search_name}' - skipped.")
             continue
 
         # Rebuild index (insert operations shift positions)
@@ -79,13 +91,13 @@ def process_components(sbom: dict, mapping: list[dict]) -> tuple[dict, list[str]
         found_indices = name_index.get(search_name, [])
 
         if not found_indices:
-            print(f"[INFO] Component '{search_name}' not found – no entry modified.")
+            print(f"[INFO] Component '{search_name}' not found - no entry modified.")
             continue
 
         if action == "replace":
             for i in found_indices:
                 components[i] = _apply_mapping(components[i], search_name, new_name, description)
-                print(f"[REPLACE] '{search_name}' → '{new_name}' (index {i})"
+                print(f"[REPLACE] '{search_name}' -> '{new_name}' (index {i})"
                       + (f" [description updated]" if description is not None else ""))
 
         elif action == "append":
@@ -122,12 +134,7 @@ python do_cyclonedx_init() {
     bb.debug(2, "CycloneDX: creating cyclonedx directory: %s" % sbom_dir)
     bb.utils.mkdirhier(sbom_dir)
 
-    metadata_component = {
-    "bom-ref": "BomRef.485485485584318.384648452452532",
-    "name": d.getVar("PN") or "image",
-    "type": "library",
-    "version": d.getVar("PV") or ""
-    }
+    metadata_component = cyclonedx_metadata_component(d)
 
     # Generate unique serial numbers for sbom document
     sbom_serial_number = str(uuid.uuid4())
@@ -342,7 +349,6 @@ python do_cyclonedx_rootfs_sbom() {
     # from oe.package_data import read_pkgdatafile, pkgdatadir
     ### --> for Yocto release kirkstone <-- ###
     import oe.packagedata
-    import Path
 
     pn = d.getVar("PN") or ""
     taskhash = d.getVar("BB_TASKHASH_do_cyclonedx_rootfs_sbom") or ""
@@ -372,13 +378,7 @@ python do_cyclonedx_rootfs_sbom() {
         sbom_serial_number = str(uuid.uuid4())
         bb.note(f"CycloneDX: SBOM not found at {sbom_path}, creating new skeleton")
 
-
-        metadata_component = {
-        "bom-ref": "BomRef.485485485584318.384648452452532",
-        "name": d.getVar("PN") or "image",
-        "type": "library",
-        "version": d.getVar("PV") or ""
-        }
+        metadata_component = cyclonedx_metadata_component(d)
 
         write_json(sbom_path, {
             "bomFormat": "CycloneDX",
@@ -537,23 +537,19 @@ python do_cyclonedx_rootfs_sbom() {
             if cpe:
                 existing_cpes.add(cpe)
 
-    # Process component mapping 
-    mapping_path_str = d.getVar("SBOM_MAPPING_PATH")
-
-    if not mapping_path_str:
-        bb.fatal("SBOM_MAPPING_PATH is not set. Please define it in your configuration.")
-
-    mapping_path = Path(mapping_path_str)
-
-    if not mapping_path.exists():
-        bb.fatal(f"SBOM mapping file not found at '{mapping_path}'. Please check SBOM_MAPPING_PATH.")
-
-    mapping = read_json(MAPPING_PATH)
-
-    if not isinstance(mapping, list):
-        raise ValueError("The mapping file must be a JSON list.")
-
-    updated_sbom = process_components(sbom, mapping)
+    # Optional component post-processing via a user-supplied mapping file.
+    # Off by default: if SBOM_MAPPING_PATH is unset or the file is absent/empty,
+    # the SBOM is written unchanged. See conf/mapping.json.example.
+    mapping_path = d.getVar("SBOM_MAPPING_PATH") or ""
+    updated_sbom = sbom
+    if mapping_path and os.path.exists(mapping_path) and os.path.getsize(mapping_path) > 0:
+        mapping = read_json(mapping_path)
+        if not isinstance(mapping, list):
+            bb.fatal(f"CycloneDX: mapping file {mapping_path} must contain a JSON list")
+        updated_sbom = process_components(sbom, mapping)
+        bb.note(f"CycloneDX: applied {len(mapping)} mapping rule(s) from {mapping_path}")
+    elif mapping_path:
+        bb.note(f"CycloneDX: mapping file not found or empty ({mapping_path}), SBOM left unchanged")
 
     # Write back SBOM
     write_json(sbom_path, updated_sbom)
@@ -563,7 +559,7 @@ python do_cyclonedx_rootfs_sbom() {
         "skipped (no pkgdata): %d, skipped (no PN): %d, skipped duplicate CPEs: %d"
         % (total_manifest_pkgs, processed_pkgs, skipped_no_pkgdata, skipped_no_pn, skipped_duplicate_cpe)
     )
-    bb.note(f"CycloneDX: final component count: {len(sbom['components'])}")
+    bb.note(f"CycloneDX: final component count: {len(updated_sbom['components'])}")
     bb.note(f"CycloneDX: SBOM written to {sbom_path}")
 }
 

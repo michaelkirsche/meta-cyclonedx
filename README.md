@@ -73,7 +73,18 @@ In the future we might include an example script in this repository.
 
 ## Mapping File Reference
 
-The `mapping.json` file controls how components in the SBOM are modified.
+Component mapping is **optional and off by default**. To enable it, copy
+`conf/mapping.json.example` to a file of your own and point `SBOM_MAPPING_PATH` at it
+in your `local.conf`:
+
+```sh
+SBOM_MAPPING_PATH = "${TOPDIR}/conf/my-sbom-mapping.json"
+```
+
+When `SBOM_MAPPING_PATH` is unset (the default) or the file is missing/empty, the SBOM
+is written unchanged.
+
+The mapping file controls how components in the SBOM are modified.
 It is a JSON array where each entry defines one transformation rule.
 
 ---

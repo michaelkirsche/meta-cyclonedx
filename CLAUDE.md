@@ -26,19 +26,32 @@ An event handler plus one task in the class, tied to the image build:
 
 1. `do_cyclonedx_init` — event handler on `bb.event.BuildStarted`. Writes an empty
    CycloneDX 1.4 skeleton (`components: []`) with a fresh UUID serial number to
-   `CYCLONEDX_EXPORT_SBOM`.
+   `CYCLONEDX_EXPORT_SBOM`. The header carries a `metadata.component` (the image
+   itself) built by `cyclonedx_metadata_component`.
 2. `do_cyclonedx_rootfs_sbom` — `addtask ... after do_image before do_image_ext4`,
    `nostamp`, guarded by a lockfile. Reads `${IMAGE_MANIFEST}` (the `<pkg> <arch>
    <version>` list of what landed in the rootfs), maps each binary package name back
    to its recipe metadata via **runtime pkgdata** (`${PKGDATA_DIR}/runtime/*`, parsed
    with `oe.packagedata.read_pkgdatafile`), and appends one component per CVE_PRODUCT
-   to the SBOM. Deduplicates by CPE.
+   to the SBOM. Deduplicates by CPE. Finally, if `SBOM_MAPPING_PATH` points at a
+   mapping file, applies component name transformations before writing (see below).
 
 Because it keys off the manifest, only packages present in the final image appear —
 native/cross/-dev artifacts are excluded automatically. Recipes without an
 `IMAGE_FSTYPES` return early (the task only does real work for image recipes).
 
 Per-component CPE/purl/type/license derivation lives in the pure helpers above the task.
+
+## Component mapping (optional post-processing)
+
+`SBOM_MAPPING_PATH` (default `""` = off) may point at a JSON file of rules that
+rename or duplicate components after collection, keyed by component name. `replace`
+rewrites `name`/`cpe`/`purl` (and optionally `description`) in place; `append` inserts
+a renamed copy after the original. Implemented by `process_components` /`_apply_mapping`
+/ `_replace_name_in_field`. The feature is skipped entirely when the var is empty or the
+file is missing/empty. `conf/mapping.json.example` is a template only — it is never
+loaded unless the user explicitly points the var at it. Full rule reference is in the
+README ("Mapping File Reference").
 
 ## Version portability
 
