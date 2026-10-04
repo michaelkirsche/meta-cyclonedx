@@ -313,9 +313,6 @@ python do_cyclonedx_rootfs_sbom() {
     import os
     import bb
     import glob
-    ### --> for newer Yocto releases > v4.1 <-- ###
-    # from oe.package_data import pkgdatadir
-    ### --> for Yocto release kirkstone <-- ###
     import oe.packagedata
 
     pn = d.getVar("PN") or ""
@@ -352,15 +349,7 @@ python do_cyclonedx_rootfs_sbom() {
     else:
         sbom_serial_number = serial
 
-    ### --> for newer Yocto releases > v4.1 <-- ###
-    # Build a mapping from package name -> pkgdata file
-    # pkgdata_dir = os.path.join(pkgdatadir(d), "runtime")
-    ### !! Check if we need to use the runtime subdirectory of the PKGDATA_DIR !!
-    # if not os.path.isdir(pkgdata_dir):
-    #     bb.fatal(f"CycloneDX: pkgdata directory not found: {pkgdata_dir}")
-
-    ### --> for Yocto release kirkstone <-- ###
-    # We use the runtime subdirectory of the PKGDATA_DIR !!
+    # Per-package metadata lives in the runtime subdirectory of PKGDATA_DIR
     base_pkgdata_dir = d.getVar("PKGDATA_DIR")
     runtime_pkgdata_dir = os.path.join(base_pkgdata_dir, "runtime")
     if not runtime_pkgdata_dir or not os.path.isdir(runtime_pkgdata_dir):

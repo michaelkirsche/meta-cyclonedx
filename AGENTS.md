@@ -94,13 +94,9 @@ README ("Mapping File Reference").
 
 ## Version portability
 
-The class targets **kirkstone** (see `LAYERSERIES_COMPAT_cyclonedx`). Code paths that
-differ on newer Yocto (> 4.1) are left in place as commented alternatives marked
-`### --> for newer Yocto releases > v4.1 <-- ###` — mainly the pkgdata import
-(`oe.packagedata` vs `oe.package_data` + `pkgdatadir`). Keep both variants in sync when
-editing pkgdata access. The commented variants are untested: scarthgap has no
-`oe.package_data` module, while `oe.packagedata` (incl. `read_subpkgdata_dict`) and
-`PKGDATA_VARS` still exist there.
+The class targets **kirkstone** only (see `LAYERSERIES_COMPAT_cyclonedx`); there are no
+code paths for other releases. The pkgdata APIs it relies on (`oe.packagedata.read_subpkgdata_dict`,
+`PKGDATA_VARS`) also exist in scarthgap, but no newer release has been built or tested.
 
 ## Enabling / running
 
