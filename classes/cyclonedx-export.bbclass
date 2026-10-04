@@ -78,6 +78,7 @@ def _apply_mapping(component, old_name, new_name, description=None):
 
 def process_components(sbom, mapping):
     import copy
+    import uuid
 
     result = copy.deepcopy(sbom)
     components = result.get("components", [])
@@ -113,6 +114,8 @@ def process_components(sbom, mapping):
             # Iterate in reverse to keep insertion positions stable
             for i in sorted(found_indices, reverse=True):
                 new_component = _apply_mapping(components[i], search_name, new_name, description)
+                # The copy is a separate component; bom-refs must be unique within a BOM
+                new_component["bom-ref"] = str(uuid.uuid4())
                 insert_pos = i + 1
                 components.insert(insert_pos, new_component)
                 print(f"[APPEND] Copy of '{search_name}' inserted as '{new_name}' at index {insert_pos}."

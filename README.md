@@ -158,8 +158,8 @@ The `name`, `cpe`, and `purl` fields are updated to use `new_name`.
 #### `append`
 
 The matched component is **kept unchanged**. A deep copy is created with
-`name`, `cpe`, and `purl` updated to use `new_name`, and inserted
-directly after the original in the component list.
+`name`, `cpe`, and `purl` updated to use `new_name` and a new unique `bom-ref`, and
+inserted directly after the original in the component list.
 
 **Before:**
 

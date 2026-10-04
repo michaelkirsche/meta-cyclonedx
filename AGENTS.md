@@ -92,7 +92,7 @@ per-package datastore copy.
 `SBOM_MAPPING_PATH` (default `""` = off) may point at a JSON file of rules that
 rename or duplicate components after collection, keyed by component name. `replace`
 rewrites `name`/`cpe`/`purl` (and optionally `description`) in place; `append` inserts
-a renamed copy after the original. Afterwards components are de-duplicated again (by CPE,
+a renamed copy (with a fresh `bom-ref`) after the original. Afterwards components are de-duplicated again (by CPE,
 else name+version) since a rule can rename one onto another. Implemented by
 `process_components` / `_apply_mapping`. The feature is skipped entirely when the var is empty or the
 file is missing/empty. `conf/mapping.json.example` is a template only — it is never
