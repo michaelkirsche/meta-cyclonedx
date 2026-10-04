@@ -117,7 +117,16 @@ def process_components(sbom, mapping):
                 print(f"[APPEND] Copy of '{search_name}' inserted as '{new_name}' at index {insert_pos}."
                       + (f" [description updated]" if description is not None else ""))
 
-    result["components"] = components
+    # A rule can rename a component onto one already listed; keep the first.
+    seen = set()
+    deduped = []
+    for c in components:
+        key = c.get("cpe") or (c.get("name"), c.get("version"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+
+    result["components"] = deduped
     return result
 
 def read_json(path):
@@ -132,18 +141,6 @@ def write_json(path, content):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(content, indent=2, sort_keys=False), encoding="utf-8")
-
-python do_cyclonedx_init() {
-    sbom_dir = d.getVar("CYCLONEDX_EXPORT_DIR")
-    bb.debug(2, "CycloneDX: creating cyclonedx directory: %s" % sbom_dir)
-    bb.utils.mkdirhier(sbom_dir)
-
-    skeleton = cyclonedx_skeleton(d)
-    bb.debug(2, f"CycloneDX: creating empty sbom file with serial number {skeleton['serialNumber']}")
-    write_json(d.getVar("CYCLONEDX_EXPORT_SBOM"), skeleton)
-}
-addhandler do_cyclonedx_init
-do_cyclonedx_init[eventmask] = "bb.event.BuildStarted"
 
 def classify_component_kind(pn, section):
     """
@@ -324,30 +321,28 @@ python do_cyclonedx_rootfs_sbom() {
         # Not an image (no filesystem types defined)
         return
 
-    manifest_path = d.getVar("IMAGE_MANIFEST") or ""
-    bb.note(f"CycloneDX: expecting rootfs manifest at {manifest_path}")
-    bb.note(f"CycloneDX: manifest exists: {os.path.exists(manifest_path)}")
-
-    if not (manifest_path and os.path.exists(manifest_path)):
-        bb.warn(f"CycloneDX: rootfs manifest not found at {manifest_path}, skipping SBOM generation")
-        return
-
     sbom_path = d.getVar("CYCLONEDX_EXPORT_SBOM")
 
-    # Ensure SBOM file exists; create skeleton if missing
-    if not os.path.exists(sbom_path):
-        bb.note(f"CycloneDX: SBOM not found at {sbom_path}, creating new skeleton")
-        write_json(sbom_path, cyclonedx_skeleton(d))
+    # IMAGE_MANIFEST carries this invocation's DATETIME, so it only exists when do_rootfs
+    # ran in this build. Otherwise (nothing changed, task re-runs due to nostamp) use the
+    # deployed ${IMAGE_LINK_NAME}.manifest link, which points at the unchanged rootfs's manifest.
+    manifest_path = d.getVar("IMAGE_MANIFEST") or ""
+    link_name = d.getVar("IMAGE_LINK_NAME") or ""
+    if not os.path.exists(manifest_path) and link_name:
+        manifest_path = os.path.join(d.getVar("DEPLOY_DIR_IMAGE"), link_name + ".manifest")
+    bb.note(f"CycloneDX: using rootfs manifest {manifest_path}")
 
-    sbom = read_json(sbom_path)
+    if not os.path.exists(manifest_path):
+        # Don't leave a previous build's (possibly another image's) SBOM behind as this image's
+        if os.path.exists(sbom_path):
+            os.remove(sbom_path)
+        bb.warn(f"CycloneDX: rootfs manifest not found at {manifest_path}, no SBOM generated")
+        return
 
-    # extract the sbom serial number without "urn:uuid:" prefix
-    serial = sbom.get("serialNumber", "")
-    prefix = "urn:uuid:"
-    if serial.startswith(prefix):
-        sbom_serial_number = serial[len(prefix):]
-    else:
-        sbom_serial_number = serial
+    # This task writes the image's complete SBOM, so always start from a fresh skeleton
+    # (metadata.component = this image). Never read the previous file: that carried over
+    # components of earlier builds and other images.
+    sbom = cyclonedx_skeleton(d)
 
     # Per-package metadata lives in the runtime subdirectory of PKGDATA_DIR
     base_pkgdata_dir = d.getVar("PKGDATA_DIR")
@@ -399,21 +394,8 @@ python do_cyclonedx_rootfs_sbom() {
         if alt_pkgname and "PN" in pkgvars:
             binpkg_to_pkgvars.setdefault(alt_pkgname, pkgvars)
     
-    # Track existing CPEs from previously generated components to avoid duplicates
-    existing_cpes = {
-        c["cpe"]
-        for c in sbom.get("components", [])
-        if isinstance(c, dict) and "cpe" in c
-    }
-
-    # Ensure SBOM has a valid components list
-    if "components" not in sbom or not isinstance(sbom["components"], list):
-        sbom["components"] = []
-
-    # Name the real image as the BOM's top-level subject. do_cyclonedx_init runs on the
-    # global datastore (PN unset) so its metadata.component is generic; here we have the
-    # image recipe's PN/PV. Multi-image builds share one bom.json -> last writer wins.
-    sbom.setdefault("metadata", {})["component"] = cyclonedx_metadata_component(d)
+    # CPEs already emitted, to collapse packages of one recipe into one component
+    existing_cpes = set()
 
     # ------------------------------------------------------------------------
     # For each manifest package, look up its runtime pkgdata entry

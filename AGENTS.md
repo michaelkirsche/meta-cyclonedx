@@ -23,24 +23,28 @@ fix the README in the same change.
 
 ## How the SBOM is built
 
-An event handler plus one task in the class, tied to the image build:
+One task in the class, tied to the image build:
 
-1. `do_cyclonedx_init` — event handler on `bb.event.BuildStarted`. Writes
-   `cyclonedx_skeleton(d)` to `CYCLONEDX_EXPORT_SBOM`: CycloneDX 1.4, `components: []`,
-   fresh `urn:uuid:` serial. Its `metadata.component` is a generic placeholder (runs on
-   the global datastore, no image PN).
-2. `do_cyclonedx_rootfs_sbom` — `addtask ... after do_image before do_image_ext4`,
-   `[nostamp]`, `[lockfiles]` = `CYCLONEDX_EXPORT_LOCK`. Recreates the skeleton if the
-   file is missing, then replaces `metadata.component` with the image recipe's PN/PV via
-   `cyclonedx_metadata_component(d)`. Reads `${IMAGE_MANIFEST}` (the `<pkg> <arch>
-   <version>` list of what landed in the rootfs), maps each binary package name back
-   to its recipe metadata via **runtime pkgdata** (`${PKGDATA_DIR}/runtime/*`, parsed
-   with `oe.packagedata.read_subpkgdata_dict`, which collapses per-package `VAR:<pkg>` keys
-   into `VAR`; renamed packages matched via the `PKG` alias, PN-less multilib stub files
-   ignored), and appends one component per `CVE_PRODUCT` entry to the SBOM. Deduplicates by
-   CPE: a recipe's binary packages collapse to one component per `CVE_PRODUCT` entry, and
-   recipes sharing a `CVE_PRODUCT`+version merge into the first-seen component. Finally, if `SBOM_MAPPING_PATH` points at a
-   mapping file, applies component name transformations before writing (see below).
+`do_cyclonedx_rootfs_sbom` — `addtask ... after do_image before do_image_ext4`,
+`[nostamp]`, `[lockfiles]` = `CYCLONEDX_EXPORT_LOCK`. Starts from a fresh
+`cyclonedx_skeleton(d)` (CycloneDX 1.4, new `urn:uuid:` serial and timestamp,
+`metadata.component` = the image's PN/PV) and writes the image's complete SBOM to
+`CYCLONEDX_EXPORT_SBOM`, overwriting it. **Never read the previous file back** — that
+carried components of earlier builds and other images into the SBOM, and there is no
+reliable reset point: a `BuildStarted` handler only fires for classes in the global
+`INHERIT`, never for a recipe-level `inherit`. Reads `${IMAGE_MANIFEST}` (the `<pkg> <arch>
+<version>` list of what landed in the rootfs). Its name embeds this invocation's `DATETIME`,
+so when `do_rootfs` didn't re-run the task falls back to the deployed
+`${DEPLOY_DIR_IMAGE}/${IMAGE_LINK_NAME}.manifest` link; if neither exists it deletes
+`CYCLONEDX_EXPORT_SBOM` and warns (never leave another build's SBOM behind). Maps each binary package name back
+to its recipe metadata via **runtime pkgdata** (`${PKGDATA_DIR}/runtime/*`, parsed
+with `oe.packagedata.read_subpkgdata_dict`, which collapses per-package `VAR:<pkg>` keys
+into `VAR`; renamed packages matched via the `PKG` alias, PN-less multilib stub files
+ignored), and appends one component per `CVE_PRODUCT` entry to the SBOM. Deduplicates by
+CPE: a recipe's binary packages collapse to one component per `CVE_PRODUCT` entry, and
+recipes sharing a `CVE_PRODUCT`+version merge into the first-seen component. Finally, if
+`SBOM_MAPPING_PATH` points at a mapping file, applies component name transformations
+before writing (see below).
 
 Because it keys off the manifest, only packages present in the final image appear —
 native/cross/-dev artifacts are excluded automatically.
@@ -73,21 +77,22 @@ per-package datastore copy.
   skips it — run `bitbake <image> -c cyclonedx_rootfs_sbom` or change the anchor. The
   `IMAGE_FSTYPES` early-return in the task is only a sanity guard; scheduling is what
   keeps it to images (the global `INHERIT` adds the task to every recipe).
-- **Reset on every build:** `do_cyclonedx_init` fires on every `BuildStarted`, including
-  non-image invocations (`bitbake -c clean foo`, single recipes), and resets `bom.json`
-  to an empty skeleton. Copy the SBOM away before running further builds.
-- **Multi-image builds:** `bom.json` is shared. Several images in one bitbake invocation
-  accumulate components; dedup also checks CPEs already in the file, so a package from
-  image A is skipped for image B. `metadata.component` names only the last image. Build
-  one image per invocation for a clean per-image SBOM.
+- **Multi-image builds:** the default `CYCLONEDX_EXPORT_SBOM` is one shared `bom.json`, so
+  with several images in one bitbake invocation the last image's SBOM wins. Set a
+  per-image path (e.g. `${CYCLONEDX_EXPORT_DIR}/${IMAGE_LINK_NAME}.bom.json`) or build one
+  image per invocation.
+- **Global `INHERIT` required for full metadata:** a recipe-level `inherit` in the image
+  recipe runs the task, but other recipes then don't write `CVE_PRODUCT`/`CVE_VERSION`/
+  `CYCLONEDX_REPO_URL` to pkgdata — components fall back to `PN`/`PV`, no repo URL.
 
 ## Component mapping (optional post-processing)
 
 `SBOM_MAPPING_PATH` (default `""` = off) may point at a JSON file of rules that
 rename or duplicate components after collection, keyed by component name. `replace`
 rewrites `name`/`cpe`/`purl` (and optionally `description`) in place; `append` inserts
-a renamed copy after the original. Implemented by `process_components` / `_apply_mapping`.
-The feature is skipped entirely when the var is empty or the
+a renamed copy after the original. Afterwards components are de-duplicated again (by CPE,
+else name+version) since a rule can rename one onto another. Implemented by
+`process_components` / `_apply_mapping`. The feature is skipped entirely when the var is empty or the
 file is missing/empty. `conf/mapping.json.example` is a template only — it is never
 loaded unless the user explicitly points the var at it. Full rule reference is in the
 README ("Mapping File Reference").
