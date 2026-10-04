@@ -17,7 +17,8 @@ PKGDATA_VARS:append = " CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL"
 do_package[vardeps] += "CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL"
 
 CYCLONEDX_EXPORT_DIR ??= "${DEPLOY_DIR}/cyclonedx-export"
-CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
+# One SBOM per image (<image>-<machine>.bom.json); PN if IMAGE_LINK_NAME is disabled ("").
+CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/${@d.getVar('IMAGE_LINK_NAME') or d.getVar('PN')}.bom.json"
 CYCLONEDX_EXPORT_LOCK ??= "${TMPDIR}/cyclonedx-export/bom.lock"
 
 # Optional SBOM post-processing. Empty = feature off. Point at your own rules
@@ -311,6 +312,7 @@ python do_cyclonedx_rootfs_sbom() {
     import bb
     import glob
     import oe.packagedata
+    import oe.path
 
     pn = d.getVar("PN") or ""
     bb.note(f"CycloneDX: do_cyclonedx_rootfs_sbom start (PN={pn})")
@@ -473,8 +475,17 @@ python do_cyclonedx_rootfs_sbom() {
     elif mapping_path:
         bb.note(f"CycloneDX: mapping file not found or empty ({mapping_path}), SBOM left unchanged")
 
-    # Write back SBOM
+    # Never write through a leftover compat link into another image's SBOM
+    if os.path.islink(sbom_path):
+        os.unlink(sbom_path)
     write_json(sbom_path, updated_sbom)
+
+    # ponytail: deprecated compat link for consumers of the old fixed bom.json name; points at
+    # the last SBOM written (last image wins). Drop once consumers read <image>.bom.json.
+    # Compare names, not paths: "dir//bom.json" != "dir/bom.json" would replace the SBOM itself.
+    if os.path.basename(sbom_path) != "bom.json":
+        compat_link = os.path.join(os.path.dirname(sbom_path), "bom.json")
+        oe.path.symlink(os.path.basename(sbom_path), compat_link, force=True)
 
     bb.note(
         "CycloneDX: manifest packages: %d, processed with pkgdata: %d, "

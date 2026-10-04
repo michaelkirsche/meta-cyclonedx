@@ -10,7 +10,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## What this is
 
-A Yocto/OpenEmbedded meta-layer that generates a CycloneDX SBOM (`bom.json`) from
+A Yocto/OpenEmbedded meta-layer that generates a CycloneDX SBOM (`<IMAGE_LINK_NAME>.bom.json`) from
 the packages actually installed into an image's root filesystem. All logic lives in
 one BitBake class: [classes/cyclonedx-export.bbclass](classes/cyclonedx-export.bbclass).
 Everything else (`conf/layer.conf`, the dummy recipe) is layer plumbing.
@@ -77,10 +77,12 @@ per-package datastore copy.
   skips it — run `bitbake <image> -c cyclonedx_rootfs_sbom` or change the anchor. The
   `IMAGE_FSTYPES` early-return in the task is only a sanity guard; scheduling is what
   keeps it to images (the global `INHERIT` adds the task to every recipe).
-- **Multi-image builds:** the default `CYCLONEDX_EXPORT_SBOM` is one shared `bom.json`, so
-  with several images in one bitbake invocation the last image's SBOM wins. Set a
-  per-image path (e.g. `${CYCLONEDX_EXPORT_DIR}/${IMAGE_LINK_NAME}.bom.json`) or build one
-  image per invocation.
+- **Output naming:** `CYCLONEDX_EXPORT_SBOM` defaults to one file per image,
+  `${IMAGE_LINK_NAME}.bom.json` (`PN` if `IMAGE_LINK_NAME` is empty). `bom.json` next to it
+  is a deprecated compat symlink to the last SBOM written (last image wins; skipped if the
+  user points `CYCLONEDX_EXPORT_SBOM` at a file literally named `bom.json` — compare
+  basenames, never full paths). A symlink at `CYCLONEDX_EXPORT_SBOM` is unlinked before
+  writing, never written through. The task's lockfile still guards that shared link.
 - **Global `INHERIT` required for full metadata:** a recipe-level `inherit` in the image
   recipe runs the task, but other recipes then don't write `CVE_PRODUCT`/`CVE_VERSION`/
   `CYCLONEDX_REPO_URL` to pkgdata — components fall back to `PN`/`PV`, no repo URL.
@@ -111,7 +113,8 @@ In `local.conf`:
 INHERIT += "cyclonedx-export"
 ```
 
-Then build the image normally. Output: `${DEPLOY_DIR}/cyclonedx-export/bom.json`.
+Then build the image normally. Output: `${DEPLOY_DIR}/cyclonedx-export/${IMAGE_LINK_NAME}.bom.json`
+(plus the deprecated `bom.json` compat symlink).
 
 There is no local test harness — validation means running an actual BitBake image
 build in a Yocto environment. Key vars: `CYCLONEDX_EXPORT_DIR`, `CYCLONEDX_EXPORT_SBOM`,
