@@ -90,7 +90,7 @@ Relevant variables (all have sensible defaults):
 | `CYCLONEDX_EXPORT_DIR` | `${DEPLOY_DIR}/cyclonedx-export` | Output directory. |
 | `CYCLONEDX_EXPORT_SBOM` | `${CYCLONEDX_EXPORT_DIR}/${IMAGE_LINK_NAME}.bom.json` | SBOM output file, one per image (`PN` if `IMAGE_LINK_NAME` is empty). |
 | `CYCLONEDX_REPO_URL` | `HOMEPAGE`, else first http(s)/git/ssh `SRC_URI` entry, stripped | Repository URL published per component; set `""` to omit (see below). |
-| `SPDX_LICENSES` | `${COREBASE}/meta/files/spdx-licenses.json` | SPDX license list for license ID conversion; if unreadable, the task warns and leaves license names unconverted. |
+| `SPDX_LICENSES` | `${COREBASE}/meta/files/spdx-licenses.json` | SPDX license list for license ID conversion; if unreadable, the task warns and leaves license names unconverted. kirkstone ships list 3.14 (2021): newer IDs (e.g. `Unicode-3.0`) become `LicenseRef-<name>`. Point this at a newer `spdx-licenses.json` (same format) to keep them. |
 | `SBOM_MAPPING_PATH` | `""` (off) | Optional component-mapping rules file (see below). |
 
 ## Building
