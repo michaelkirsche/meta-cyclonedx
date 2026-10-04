@@ -8,6 +8,14 @@
 CVE_PRODUCT ??= "${BPN}"
 CVE_VERSION ??= "${PV}"
 
+# Runtime pkgdata lacks CVE_PRODUCT/CVE_VERSION/HOMEPAGE/SRC_URI, so have emit_pkgdata
+# write them per package for do_cyclonedx_rootfs_sbom to read back. Only the derived,
+# credential-free repo URL is stored, never raw SRC_URI. emit_pkgdata reads these values
+# dynamically, hence the explicit vardeps so sstate notices when they change.
+CYCLONEDX_REPO_URL = "${@cyclonedx_repo_url(d.getVar('HOMEPAGE'), d.getVar('SRC_URI'))}"
+PKGDATA_VARS:append = " CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL"
+do_package[vardeps] += "CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL"
+
 CYCLONEDX_EXPORT_DIR ??= "${DEPLOY_DIR}/cyclonedx-export"
 CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/bom.json"
 CYCLONEDX_EXPORT_LOCK ??= "${TMPDIR}/cyclonedx-export/bom.lock"
@@ -252,6 +260,21 @@ def generate_packages_list(products_names, version, component_kind, license_expr
         packages.append(pkg)
     return packages
 
+def cyclonedx_repo_url(homepage, src_uri):
+    """
+    HOMEPAGE, else the first http(s)/git/ssh SRC_URI entry stripped of ;params,
+    ?query, #fragment and user:password@ credentials (the result is published in the SBOM).
+    """
+    if (homepage or "").strip():
+        return homepage.strip()
+    for entry in (src_uri or "").split():
+        if entry.startswith(("http://", "https://", "git://", "ssh://", "git+")):
+            url = entry.split(";", 1)[0].split("#", 1)[0].split("?", 1)[0]
+            scheme, sep, rest = url.partition("://")
+            host, slash, path = rest.partition("/")
+            return f"{scheme}{sep}{host.rpartition('@')[2]}{slash}{path}"
+    return ""
+
 def cyclonedx_collect_recipe_metadata(d, pn):
     """
     Collects per-recipe metadata needed to build CycloneDX components.
@@ -266,37 +289,12 @@ def cyclonedx_collect_recipe_metadata(d, pn):
     section = d.getVar("SECTION") or ""
     component_kind = classify_component_kind(pn, section)
 
-    # license: prefer per-PN overrides
-    license_expr = (
-        d.getVar(f"LICENSE:{pn}")
-        or d.getVar(f"LICENSE_{pn}")
-        or d.getVar("LICENSE")
-        or ""
-    )
+    # per-package overrides (LICENSE:<pkg> etc.) are already collapsed by read_subpkgdata_dict
+    license_expr = d.getVar("LICENSE") or ""
+    description = d.getVar("DESCRIPTION") or ""
 
-    # description: prefer per-PN overrides
-    description = (
-        d.getVar(f"DESCRIPTION:{pn}")
-        or d.getVar(f"DESCRIPTION_{pn}")
-        or d.getVar("DESCRIPTION")
-        or ""
-    )
-
-    # homepage / repo URL
-    homepage = d.getVar("HOMEPAGE") or ""
-    src_uri = d.getVar("SRC_URI") or ""
-    repo_url = ""
-
-    if homepage:
-        repo_url = homepage.strip()
-    else:
-        for entry in src_uri.split():
-            e = entry.strip()
-            if not e or e.startswith("file://"):
-                continue
-            if e.startswith(("http://", "https://", "git://", "ssh://", "git+")):
-                repo_url = e.split(";", 1)[0]
-                break
+    # homepage / repo URL, derived in the package's recipe context (see PKGDATA_VARS above)
+    repo_url = d.getVar("CYCLONEDX_REPO_URL") or ""
 
     return {
         "cve_product": name,
@@ -316,7 +314,7 @@ python do_cyclonedx_rootfs_sbom() {
     import bb
     import glob
     ### --> for newer Yocto releases > v4.1 <-- ###
-    # from oe.package_data import read_pkgdatafile, pkgdatadir
+    # from oe.package_data import pkgdatadir
     ### --> for Yocto release kirkstone <-- ###
     import oe.packagedata
 
@@ -396,24 +394,21 @@ python do_cyclonedx_rootfs_sbom() {
         if not os.path.isfile(rfile):
             continue
 
-        ### --> for newer Yocto releases > v4.1 <-- ###
-        # pkgvars = read_pkgdatafile(rfile)
-        ### --> for Yocto release kirkstone <-- ###
-        pkgvars = oe.packagedata.read_pkgdatafile(rfile)
-        
-        # primary name is the runtime file basename
+        # primary name is the runtime file basename. read_subpkgdata_dict reads
+        # ${PKGDATA_DIR}/runtime/<pkg> and collapses per-package "VAR:<pkg>" keys
+        # (written instead of VAR when a recipe sets e.g. LICENSE:<pkg>) into VAR.
+        # Same API on kirkstone and newer releases.
         bpkg_name = os.path.basename(rfile)
-        if bpkg_name not in binpkg_to_pkgvars:
-            binpkg_to_pkgvars[bpkg_name] = pkgvars
+        pkgvars = oe.packagedata.read_subpkgdata_dict(bpkg_name, d)
+        # real runtime files win over PKG aliases registered by earlier files
+        binpkg_to_pkgvars[bpkg_name] = pkgvars
 
-        # optional: parse any PKG:* lines as additional names
-        for k, v in pkgvars.items():
-            if not k.startswith("PKG:"):
-                continue
-            # value is the actual binary package name used in feeds/rootfs
-            alt_pkgname = v.strip()
-            if alt_pkgname and alt_pkgname not in binpkg_to_pkgvars:
-                binpkg_to_pkgvars[alt_pkgname] = pkgvars
+        # PKG is the actual binary package name used in feeds/rootfs (renamed packages).
+        # Skip PN-less files: multilib stubs that only hold a PKG line pointing at the
+        # real package would otherwise shadow its pkgdata.
+        alt_pkgname = (pkgvars.get("PKG") or "").strip()
+        if alt_pkgname and "PN" in pkgvars:
+            binpkg_to_pkgvars.setdefault(alt_pkgname, pkgvars)
     
     # Track existing CPEs from previously generated components to avoid duplicates
     existing_cpes = {
@@ -454,19 +449,18 @@ python do_cyclonedx_rootfs_sbom() {
         d_recipe = d.createCopy()
         # Ensure PN in the sub-datastore matches the recipe
         d_recipe.setVar("PN", pn)
-        # Import selected metadata from pkgdata (PV, LICENSE, DESCRIPTION, SECTION, HOMEPAGE, SRC_URI, etc.)
-        # Set unconditionally: runtime pkgdata lacks HOMEPAGE/SRC_URI/CVE_PRODUCT/CVE_VERSION, so a
-        # conditional set would leave the image recipe's values leaking into every component.
+        # Import selected metadata from pkgdata (CVE_* and CYCLONEDX_REPO_URL via PKGDATA_VARS).
+        # Set unconditionally: emit_pkgdata omits empty values (and pkgdata written before this
+        # layer was enabled lacks our keys), so a conditional set would leak the image recipe's
+        # values into every component.
         for key in (
             "PV",
             "LICENSE",
             "DESCRIPTION",
-            "HOMEPAGE",
             "SECTION",
-            "SRC_URI",
             "CVE_PRODUCT",
             "CVE_VERSION",
-            "CVE_CHECK_IGNORE",
+            "CYCLONEDX_REPO_URL",
         ):
             d_recipe.setVar(key, pkgvars.get(key, ""))
 

@@ -35,26 +35,36 @@ An event handler plus one task in the class, tied to the image build:
    `cyclonedx_metadata_component(d)`. Reads `${IMAGE_MANIFEST}` (the `<pkg> <arch>
    <version>` list of what landed in the rootfs), maps each binary package name back
    to its recipe metadata via **runtime pkgdata** (`${PKGDATA_DIR}/runtime/*`, parsed
-   with `oe.packagedata.read_pkgdatafile`; renamed packages matched via `PKG:*` keys),
-   and appends components to the SBOM. Deduplicates by CPE, so all binary packages of one
-   recipe collapse into a single component. Finally, if `SBOM_MAPPING_PATH` points at a
+   with `oe.packagedata.read_subpkgdata_dict`, which collapses per-package `VAR:<pkg>` keys
+   into `VAR`; renamed packages matched via the `PKG` alias, PN-less multilib stub files
+   ignored), and appends one component per `CVE_PRODUCT` entry to the SBOM. Deduplicates by
+   CPE: a recipe's binary packages collapse to one component per `CVE_PRODUCT` entry, and
+   recipes sharing a `CVE_PRODUCT`+version merge into the first-seen component. Finally, if `SBOM_MAPPING_PATH` points at a
    mapping file, applies component name transformations before writing (see below).
 
 Because it keys off the manifest, only packages present in the final image appear —
 native/cross/-dev artifacts are excluded automatically.
 
+Stock runtime pkgdata has no `CVE_PRODUCT`/`CVE_VERSION`/`HOMEPAGE`/`SRC_URI`. The class
+appends `CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL` to `PKGDATA_VARS`, so each target
+recipe's `emit_pkgdata` (inside `do_package`) writes them into its runtime pkgdata.
+`CYCLONEDX_REPO_URL` is derived in recipe context by `cyclonedx_repo_url` (HOMEPAGE, else
+first http(s)/git/ssh SRC_URI entry without `;params`, `?query`, `#fragment` or `user:pass@`) — never store raw `SRC_URI`, it can
+carry credentials into sstate and the SBOM. `do_package[vardeps]` lists the same three vars
+because `emit_pkgdata` reads values dynamically; keep both lists in sync. Consequence:
+enabling the class (or changing these lists) re-runs `do_package` for every target recipe once.
+
 Per-package metadata comes from `d.createCopy()` of the image datastore, with pkgdata
 keys set **unconditionally** (`setVar(key, pkgvars.get(key, ""))`). Never make that
-conditional — the image recipe's values would leak into every component (fixed in
-8a70cdf). Kirkstone runtime pkgdata has no `CVE_PRODUCT`/`CVE_VERSION`/`HOMEPAGE`/`SRC_URI`,
-so in practice components are named after pkgdata `PN`, versioned from `PV`, carry no
-`externalReferences`, and recipe `CVE_PRODUCT` overrides are not honored.
+conditional — `emit_pkgdata` omits empty values, so the image recipe's values would leak
+into every component (fixed in 8a70cdf).
 
-Per-component derivation sits above the task. Pure helpers: `classify_component_kind`
-(SECTION/PN → CycloneDX type), `normalize_license_expression` (`|`/`&` → OR/AND),
-`generate_packages_list` (CPE `cpe:2.3:*:<vendor|*>:<product>:<ver>:...`, purl
-`pkg:generic/[vendor/]product@ver`, strips `+git...` from the version).
-`cyclonedx_collect_recipe_metadata(d, pn)` reads the per-package datastore copy.
+Per-component derivation sits above the task. Pure helpers: `cyclonedx_repo_url`,
+`classify_component_kind` (SECTION/PN → CycloneDX type), `normalize_license_expression`
+(`|`/`&` → OR/AND), `generate_packages_list` (one component per `CVE_PRODUCT` entry; CPE
+`cpe:2.3:*:<vendor|*>:<product>:<ver>:...`, purl `pkg:generic/[vendor/]product@ver`,
+strips `+git...` from the version). `cyclonedx_collect_recipe_metadata(d, pn)` reads the
+per-package datastore copy.
 
 ### Gotchas
 
@@ -88,7 +98,9 @@ The class targets **kirkstone** (see `LAYERSERIES_COMPAT_cyclonedx`). Code paths
 differ on newer Yocto (> 4.1) are left in place as commented alternatives marked
 `### --> for newer Yocto releases > v4.1 <-- ###` — mainly the pkgdata import
 (`oe.packagedata` vs `oe.package_data` + `pkgdatadir`). Keep both variants in sync when
-editing pkgdata access.
+editing pkgdata access. The commented variants are untested: scarthgap has no
+`oe.package_data` module, while `oe.packagedata` (incl. `read_subpkgdata_dict`) and
+`PKGDATA_VARS` still exist there.
 
 ## Enabling / running
 
