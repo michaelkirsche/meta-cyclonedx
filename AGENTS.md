@@ -42,7 +42,11 @@ with `oe.packagedata.read_subpkgdata_dict`, which collapses per-package `VAR:<pk
 into `VAR`; renamed packages matched via the `PKG` alias, PN-less multilib stub files
 ignored), and appends one component per `CVE_PRODUCT` entry to the SBOM. Deduplicates by
 CPE: a recipe's binary packages collapse to one component per `CVE_PRODUCT` entry, and
-recipes sharing a `CVE_PRODUCT`+version merge into the first-seen component. Finally, if
+recipes sharing a `CVE_PRODUCT`+version merge into the first-seen component. Merging
+AND-joins the licenses (`merge_license_expressions`; `LICENSE:<pkg>` can be narrower than the
+recipe's, e.g. util-linux's libraries) and switches to the description of the recipe's base
+package (runtime file named `PN`, possibly installed under its `PKG` alias) when one arrives
+— sub-packages often carry their own (`util-linux libblkid`). Finally, if
 `SBOM_MAPPING_PATH` points at a mapping file, applies component name transformations
 before writing (see below).
 
@@ -52,7 +56,8 @@ native/cross/-dev artifacts are excluded automatically.
 Stock runtime pkgdata has no `CVE_PRODUCT`/`CVE_VERSION`/`HOMEPAGE`/`SRC_URI`. The class
 appends `CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL` to `PKGDATA_VARS`, so each target
 recipe's `emit_pkgdata` (inside `do_package`) writes them into its runtime pkgdata.
-`CYCLONEDX_REPO_URL` is derived in recipe context by `cyclonedx_repo_url` (HOMEPAGE, else
+`CYCLONEDX_REPO_URL` (weak default `??=`, so `local.conf`, a recipe or `:pn-<recipe>` can clear
+it) is derived in recipe context by `cyclonedx_repo_url` (HOMEPAGE, else
 first http(s)/git/ssh SRC_URI entry without `;params`, `?query`, `#fragment` or `user:pass@`) — never store raw `SRC_URI`, it can
 carry credentials into sstate and the SBOM. `do_package[vardeps]` lists the same three vars
 because `emit_pkgdata` reads values dynamically; keep both lists in sync. Consequence:
@@ -64,8 +69,15 @@ conditional — `emit_pkgdata` omits empty values, so the image recipe's values 
 into every component (fixed in 8a70cdf).
 
 Per-component derivation sits above the task. Pure helpers: `cyclonedx_repo_url`,
-`classify_component_kind` (SECTION/PN → CycloneDX type), `normalize_license_expression`
-(`|`/`&` → OR/AND), `generate_packages_list` (one component per `CVE_PRODUCT` entry; CPE
+`classify_component_kind` (SECTION/PN → CycloneDX type; `operating-system` only for SECTION
+`images` — never match PN `*-image`, that catches packages like `fstab-production-image`),
+`normalize_license_expression` (`|`/`&` → ` OR `/` AND `; given the SPDX ID list, also
+names like oe-core's `convert_license_to_spdx`: `SPDXLICENSEMAP` alias → SPDX ID
+(case-insensitive, deprecated IDs kept) → else `LicenseRef-<name>` sanitized to `[A-Za-z0-9.-]`;
+the task loads `SPDX_LICENSES` once and passes it, `generate_packages_list` re-normalizes
+operators only — keep it idempotent), `merge_license_expressions` (AND-join,
+each top-level AND term once; an expression with a top-level OR stays one term because AND binds
+tighter), `generate_packages_list` (one component per `CVE_PRODUCT` entry; CPE
 `cpe:2.3:*:<vendor|*>:<product>:<ver>:...`, purl `pkg:generic/[vendor/]product@ver`,
 strips `+git...` from the version). `cyclonedx_collect_recipe_metadata(d, pn)` reads the
 per-package datastore copy.
@@ -85,7 +97,8 @@ per-package datastore copy.
   writing, never written through. The task's lockfile still guards that shared link.
 - **Global `INHERIT` required for full metadata:** a recipe-level `inherit` in the image
   recipe runs the task, but other recipes then don't write `CVE_PRODUCT`/`CVE_VERSION`/
-  `CYCLONEDX_REPO_URL` to pkgdata — components fall back to `PN`/`PV`, no repo URL.
+  `CYCLONEDX_REPO_URL` to pkgdata — components fall back to `PN`/`PV`, no vendor, no repo
+  URL. Still a supported mode (README documents both); don't break it.
 
 ## Component mapping (optional post-processing)
 

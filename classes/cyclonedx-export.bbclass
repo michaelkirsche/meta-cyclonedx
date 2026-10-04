@@ -12,7 +12,9 @@ CVE_VERSION ??= "${PV}"
 # write them per package for do_cyclonedx_rootfs_sbom to read back. Only the derived,
 # credential-free repo URL is stored, never raw SRC_URI. emit_pkgdata reads these values
 # dynamically, hence the explicit vardeps so sstate notices when they change.
-CYCLONEDX_REPO_URL = "${@cyclonedx_repo_url(d.getVar('HOMEPAGE'), d.getVar('SRC_URI'))}"
+# Weak default: set CYCLONEDX_REPO_URL = "" (globally, per recipe or via :pn-<recipe>) to keep
+# e.g. internal Git hosts out of the SBOM.
+CYCLONEDX_REPO_URL ??= "${@cyclonedx_repo_url(d.getVar('HOMEPAGE'), d.getVar('SRC_URI'))}"
 PKGDATA_VARS:append = " CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL"
 do_package[vardeps] += "CVE_PRODUCT CVE_VERSION CYCLONEDX_REPO_URL"
 
@@ -20,6 +22,9 @@ CYCLONEDX_EXPORT_DIR ??= "${DEPLOY_DIR}/cyclonedx-export"
 # One SBOM per image (<image>-<machine>.bom.json); PN if IMAGE_LINK_NAME is disabled ("").
 CYCLONEDX_EXPORT_SBOM ??= "${CYCLONEDX_EXPORT_DIR}/${@d.getVar('IMAGE_LINK_NAME') or d.getVar('PN')}.bom.json"
 CYCLONEDX_EXPORT_LOCK ??= "${TMPDIR}/cyclonedx-export/bom.lock"
+
+# SPDX license list used to validate license IDs (same weak default as create-spdx.bbclass)
+SPDX_LICENSES ??= "${COREBASE}/meta/files/spdx-licenses.json"
 
 # Optional SBOM post-processing. Empty = feature off. Point at your own rules
 # file (see conf/mapping.json.example) to rename/append components.
@@ -156,7 +161,7 @@ def classify_component_kind(pn, section):
     p = (pn or "").lower()
 
     # OS / distro level
-    if s.startswith("images") or p.endswith("-image"):
+    if s.startswith("images"):
         return "operating-system"
 
     # firmware / bootloader-ish
@@ -178,15 +183,62 @@ def classify_component_kind(pn, section):
     # default fallback
     return "application"
 
-def normalize_license_expression(expr):
+def normalize_license_expression(expr, spdx_ids=None, spdx_map=None):
     """
-    Normalize Yocto license operators to SPDX-style operators: '|' -> 'OR', '&' -> 'AND'.
+    Yocto LICENSE -> SPDX expression: '|' -> 'OR', '&' -> 'AND'. With spdx_ids (lower-case
+    SPDX ID -> SPDX ID) license names are also mapped like oe-core's create-spdx: through
+    spdx_map (SPDXLICENSEMAP aliases), kept if an SPDX ID (deprecated IDs included), else
+    LicenseRef-<name> (PD, CLOSED, custom licenses).
     """
+    import re
     if not expr:
         return ""
-    normalized = expr.replace("|", "OR").replace("&", "AND")
-    # collapse whitespace
-    return " ".join(normalized.split())
+    toks = expr.replace("|", " OR ").replace("&", " AND ").replace("(", " ( ").replace(")", " ) ").split()
+    if spdx_ids is not None:
+        def spdx(tok):
+            if tok in ("(", ")", "AND", "OR", "WITH") or tok.startswith(("LicenseRef-", "DocumentRef-")):
+                return tok
+            tok = (spdx_map or {}).get(tok) or tok
+            return spdx_ids.get(tok.lower()) or "LicenseRef-" + re.sub(r"[^A-Za-z0-9.-]", "-", tok)
+        toks = [spdx(t) for t in toks]
+    # Yocto reads whitespace between two operands as '&' (oe.license); SPDX needs it explicit
+    ops = ("AND", "OR", "WITH")
+    out = []
+    for tok in toks:
+        if out and out[-1] not in ops + ("(",) and tok not in ops + (")",):
+            out.append("AND")
+        out.append(tok)
+    return " ".join(out).replace("( ", "(").replace(" )", ")")
+
+def merge_license_expressions(exprs):
+    """
+    AND-join normalized license expressions, listing each top-level AND term once.
+    """
+    # key: term as AND-joined (an OR term parenthesized, so "A OR B" from an input and
+    # "(A OR B)" from an earlier merge match); value: the bare term
+    terms = {}
+    for expr in exprs:
+        toks = (expr or "").replace("(", " ( ").replace(")", " ) ").split()
+        parts, cur, depth, has_or = [], [], 0, False
+        for tok in toks:
+            depth += (tok == "(") - (tok == ")")
+            if depth == 0 and tok == "AND":
+                parts.append(cur)
+                cur = []
+            else:
+                has_or |= depth == 0 and tok == "OR"
+                cur.append(tok)
+        parts.append(cur)
+        # AND binds tighter than OR: "A OR B AND C" is one term, not "A OR B" and "C"
+        if has_or:
+            parts = [toks]
+        for part in parts:
+            term = " ".join(part).replace("( ", "(").replace(" )", ")")
+            if term:
+                terms.setdefault(f"({term})" if has_or else term, term)
+    if len(terms) == 1:
+        return next(iter(terms.values()))
+    return " AND ".join(terms)
 
 def generate_packages_list(products_names, version, component_kind, license_expr, description, repo_url):
     """
@@ -314,6 +366,7 @@ python do_cyclonedx_rootfs_sbom() {
     import os
     import bb
     import glob
+    import json
     import oe.packagedata
     import oe.path
 
@@ -399,8 +452,19 @@ python do_cyclonedx_rootfs_sbom() {
         if alt_pkgname and "PN" in pkgvars:
             binpkg_to_pkgvars.setdefault(alt_pkgname, pkgvars)
     
-    # CPEs already emitted, to collapse packages of one recipe into one component
-    existing_cpes = set()
+    # SPDX license IDs for normalize_license_expression; without them only operators are mapped
+    spdx_ids = None
+    try:
+        with open(d.getVar("SPDX_LICENSES"), encoding="utf-8") as f:
+            spdx_ids = {l["licenseId"].lower(): l["licenseId"] for l in json.load(f)["licenses"]}
+    except (OSError, TypeError, ValueError, KeyError) as e:
+        bb.warn(f"CycloneDX: cannot read SPDX license list {d.getVar('SPDX_LICENSES')} ({e}), license names left unmapped")
+    spdx_map = d.getVarFlags("SPDXLICENSEMAP") or {}
+
+    # CPE -> component already emitted, to collapse packages of one recipe into one component
+    existing_cpes = {}
+    # CPEs whose description comes from a recipe's base package (runtime name = PN)
+    base_described = set()
 
     # ------------------------------------------------------------------------
     # For each manifest package, look up its runtime pkgdata entry
@@ -420,6 +484,8 @@ python do_cyclonedx_rootfs_sbom() {
             continue
 
         processed_pkgs += 1
+        # base package: the runtime file named PN (this is it, or its PKG alias)
+        is_base = binpkg_to_pkgvars.get(pn) is pkgvars
 
         # Create a sub-datastore for this recipe to reuse helper functions
         d_recipe = d.createCopy()
@@ -447,7 +513,7 @@ python do_cyclonedx_rootfs_sbom() {
             meta["cve_product"],
             meta["cve_version"],
             meta["component_kind"],
-            meta["license_expr"],
+            normalize_license_expression(meta["license_expr"], spdx_ids, spdx_map),
             meta["description"],
             meta["repo_url"],
         )
@@ -455,14 +521,25 @@ python do_cyclonedx_rootfs_sbom() {
         for comp in components:
             cpe = comp.get("cpe")
 
-            # Apply optional duplicate-CPE filtering
-            if cpe and cpe in existing_cpes:
+            # Packages of one recipe share the CPE and collapse into one component, which
+            # stands for all of them: AND-join every package's license (LICENSE:<pkg> can be
+            # narrower than the recipe's) and prefer the base package's (recipe-level) description.
+            prev = existing_cpes.get(cpe) if cpe else None
+            if prev is not None:
                 skipped_duplicate_cpe += 1
+                licenses = [c["licenses"][0]["expression"] for c in (prev, comp) if c.get("licenses")]
+                if licenses:
+                    prev["licenses"] = [{"expression": merge_license_expressions(licenses)}]
+                if is_base and comp.get("description") and cpe not in base_described:
+                    prev["description"] = comp["description"]
+                    base_described.add(cpe)
                 continue
 
             sbom["components"].append(comp)
             if cpe:
-                existing_cpes.add(cpe)
+                existing_cpes[cpe] = comp
+                if is_base and comp.get("description"):
+                    base_described.add(cpe)
 
     # Optional component post-processing via a user-supplied mapping file.
     # Off by default: if SBOM_MAPPING_PATH is unset or the file is absent/empty,
@@ -492,7 +569,7 @@ python do_cyclonedx_rootfs_sbom() {
 
     bb.note(
         "CycloneDX: manifest packages: %d, processed with pkgdata: %d, "
-        "skipped (no pkgdata): %d, skipped (no PN): %d, skipped duplicate CPEs: %d"
+        "skipped (no pkgdata): %d, skipped (no PN): %d, merged duplicate CPEs: %d"
         % (total_manifest_pkgs, processed_pkgs, skipped_no_pkgdata, skipped_no_pn, skipped_duplicate_cpe)
     )
     bb.note(f"CycloneDX: final component count: {len(updated_sbom['components'])}")
